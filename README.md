@@ -1,104 +1,38 @@
-# Bambu Monitor ESP32
+# Bambu Monitor — WeAct BWR / ESP32
 
-An e-paper status display for Bambu Lab printers. Shows print progress, temperatures and a preview of the current plate over your local network.
+A local-network status display for a Bambu Lab H2D, using an ESP32-WROOM and a
+**2.9-inch 296×128 black/white/red WeAct e-paper panel**. This repository builds
+on [Alloyd21/Bambu_Monitor](https://github.com/Alloyd21/Bambu_Monitor) and retains
+the original LilyGo display profile.
 
-![Bambu Monitor](img/Main.png)
+![WeAct layout preview](img/weact-preview.png)
 
-## Hardware
+The screenshot is a reference layout; run the desktop renderer below for the
+current typography and thumbnail processing.
 
-[LILYGO T5 4.7" E-paper V2.3 ESP32-S3](https://www.aliexpress.com/item/1005004647326743.html)
+## Current display
 
-A microSD card is optional. If one is inserted, the display writes a log to `log.txt` and caches the current plate preview so it reappears straight away after a restart.
+- Chicago typography, with bitmap text for the job name.
+- Print percentage, remaining time, and layer count; current layer number in red.
+- Solid progress fill over a retro 25% black-dot background.
+- Chamber, bed, left/right nozzle, AMS temperature, and AMS humidity readings.
+- Celsius degree symbols; bold sensor values with a regular-weight humidity `%`.
+- Red nozzle values at 180°C and above; missing values show `--`.
+- An 88×76 black-and-white model preview, with a Bambu logo fallback.
 
-## Supported printers
+The panel is rotated 180° from the original landscape orientation for the
+current housing (`setRotation(3)` in the sketch). Refreshes are rate-limited to
+at least 60 seconds after the previous refresh completes, and only redraw when
+visible information changes. A full refresh has taken about 18.5 seconds on
+this setup. MQTT is serviced while the panel is busy.
 
-Tested on the Bambu Lab X2D. Other Bambu printers with LAN mode should work too; readings a printer doesn't have (a second nozzle, chamber sensor or AMS) are simply left off the screen.
+## Hardware and setup
 
-## Printer requirements
+The current WeAct setup has been used with an H2D. The original upstream project
+reports testing its LilyGo profile with an X2D. Other printers and firmware
+versions may report different sensors or expose different local-access options.
 
-- **LAN mode** enabled, with the printer on the same network as the display.
-- **Developer mode** enabled (needed on recent firmware for local MQTT and FTP access).
-- The printer's IP address and access code, found on the printer under Settings > Network.
-
-### Plate preview
-
-The WeAct preview first tries configured mappings, filename matches, and the
-printer task-ID cache path. If those fail, it scans `3D/3dmodel.model` inside
-stored 3MF archives for an exact `ProfileTitle` or `Title` matching the reported
-job name. This handles MakerWorld profile names that differ from filenames.
-XML text entities and surrounding whitespace are handled. Duplicate metadata
-title matches are rejected instead of selecting an arbitrary archive. The
-active plate still selects the thumbnail.
-
-The metadata scan uses batches of eight filenames, services MQTT between
-transfers, and limits both compressed and expanded metadata to 24 KiB. Large
-metadata or unsupported archives are skipped. A first scan can take several
-minutes on a printer with many files; incomplete range reads get one retry on
-a fresh FTP session, and unsuccessful thumbnail attempts are retried later.
-The last completed job can finish loading its preview too. Confirmed exceptions
-can still be added to `Bambu_Monitor_ESP32/thumbnail_sources.h`.
-
-Host parser checks: `c++ -std=c++11 tools/tests/thumbnail_identity.cpp -o /tmp/thumbnail_identity && /tmp/thumbnail_identity`.
-
-The preview is read from a 3MF archive accessible on the printer's local storage over FTPS. Availability depends on whether that job's archive is stored there; a cloud or LAN submission by itself does not establish availability. Telemetry can work even when no local archive is available.
-
-## Setup
-
-1. Copy `Bambu_Monitor_ESP32/credentials.example.h` to `credentials.h` and fill in your WiFi, printer IP, access code and serial.
-2. In the Arduino IDE, install the **esp32** board package **version 2.0.15** (the LilyGo-EPD47 library doesn't support 3.x).
-3. Install libraries:
-   - From GitHub (download the ZIP, then **Sketch > Include Library > Add .ZIP Library**):
-     - [LilyGo-EPD47, `esp32s3` branch](https://github.com/Xinyuan-LilyGO/LilyGo-EPD47/tree/esp32s3)
-     - [pngle](https://github.com/kikuchan/pngle)
-   - From the Library Manager: PubSubClient 2.8, ArduinoJson 7.4.3.
-4. Open `Bambu_Monitor_ESP32/Bambu_Monitor_ESP32.ino`, select **ESP32S3 Dev Module** with **PSRAM: OPI PSRAM**, **Flash Size: 16MB** and **Partition: 16M Flash (3MB APP/9.9MB FATFS)**, then upload.
-
-## Tools
-
-Optional helper scripts in `tools/`:
-
-- `printer_state.py` connects to the printer (using `credentials.h`), saves its full status to `tools/bambu_dump.json` and prints a readable summary. Handy for checking what your printer reports. Needs `pip install paho-mqtt`.
-- `preview/render.py` renders every screen layout to PNGs in `tools/preview/out`, so you can tweak the design without flashing the board. Needs g++, Pillow, numpy and the LilyGo-EPD47 library (set `EPD47_LIB` to its `src` folder if it isn't in `~/Documents/Arduino/libraries`).
-- `make_fonts.py` regenerates the `font_*.h` headers from the Inter fonts in `tools/fonts`. Needs `pip install freetype-py`.
-
-
-## Screens
-![Bambu Monitor](img/all.png)
-
-## Credits
-
-The Mini Turtle shown in the screenshots and preview is [Mini Turtle on MakerWorld](https://makerworld.com/en/models/2670421-mini-turtle#profileId-2955615).
-
-## Licence
-
-[PolyForm Noncommercial 1.0.0](PolyForm%20NonCommercial%201.0.0.txt): free to use, modify and share for any non-commercial purpose. The Inter fonts in `tools/fonts` (and the `font_*.h` headers generated from them) are under the [SIL Open Font License](tools/fonts/Inter-LICENSE.txt).
-
-## Disclaimer
-
-This is an independent hobby project and is not affiliated with, endorsed by or supported by Bambu Lab or Bambu Studio. "Bambu Lab" and printer model names are trademarks of their respective owners.
-
-The software is provided as is, without warranty of any kind. Use it at your own risk; the author accepts no liability for any damage to your printer, prints or other equipment.
-
-## Support
-
-This is a hobby project shared for free. If it's been handy and you'd like to say thanks, a coffee is always appreciated.
-
-<a href="https://www.buymeacoffee.com/AdamL" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" height="60" width="217"></a>
-
-## WeAct 2.9-inch BWR / ESP32-WROOM
-
-The original LilyGo profile remains the default. In
-`Bambu_Monitor_ESP32/hardware_config.h`, change the default `MONITOR_DISPLAY`
-to `DISPLAY_WEACT` (or compile with `-DMONITOR_DISPLAY=2`). Use the WeAct-recommended
-**GxEPD2_290_C90c** driver with a 296×128 landscape layout.
-
-Install esp32 **2.0.15**, **GxEPD2 1.6.9** (including Adafruit GFX/BusIO),
-**PubSubClient 2.8**, **ArduinoJson 7.4.3**, and **pngle**. LilyGo-EPD47 is not
-needed for this profile. Select **ESP32 Dev Module**, **PSRAM: Disabled**,
-**Flash Size: 4MB**, and **Partition Scheme: Huge APP (3MB No OTA/1MB SPIFFS)**
-for a standard 4MB ESP32-WROOM DevKit. Copy and fill in `credentials.h` as above.
-
-| Panel pin | ESP32 connection |
+| WeAct panel pin | ESP32 connection |
 | --- | --- |
 | BUSY | GPIO 4 |
 | CS | GPIO 5 |
@@ -109,65 +43,164 @@ for a standard 4MB ESP32-WROOM DevKit. Copy and fill in `credentials.h` as above
 | VCC | 3.3V |
 | GND | GND |
 
-![WeAct native-resolution preview](img/weact-preview.png)
+1. Install Arduino ESP32 core **2.0.15**.
+2. Install **GxEPD2 1.6.9**, Adafruit GFX/BusIO, **PubSubClient 2.8**,
+   **ArduinoJson 7.4.3**, and [pngle](https://github.com/kikuchan/pngle).
+3. Copy `Bambu_Monitor_ESP32/credentials.example.h` to
+   `Bambu_Monitor_ESP32/credentials.h` and enter your Wi-Fi credentials, printer
+   IP, access code, and serial. Keep the printer and display on the same local
+   network; enable the local MQTT/FTPS access options required by your printer
+   firmware, including developer mode where applicable.
+4. Select the WeAct profile in `hardware_config.h` using `DISPLAY_WEACT`, or pass
+   `-DMONITOR_DISPLAY=2` when compiling. **The source default is still LilyGo.**
+5. Select **ESP32 Dev Module**, **PSRAM disabled**, **4MB flash**, and
+   **Huge APP (3MB No OTA/1MB SPIFFS)** for the current ESP32-WROOM board.
+6. Build and upload `Bambu_Monitor_ESP32/Bambu_Monitor_ESP32.ino`.
 
-The screen reserves **88×76 pixels** for a cropped, monochrome model preview.
-Progress, remaining time, job name, and layers sit beside it; six compact sensor
-columns sit below. Temperatures are Celsius; `L1`–`L5` indicate AMS humidity
-levels when a percentage is unavailable. Missing readings show `--`.
-Full refreshes happen at most once per minute, only when the status signature
-changes. Full refreshes take several seconds;
-MQTT is serviced while the panel is busy. Boot details go to the serial log.
+This BWR panel uses the **GxEPD2_290_C90c** driver. LilyGo-EPD47 is not required
+for the WeAct build.
 
-### Preview limits on WROOM
+### Arduino CLI
 
-Preview loading prefers the current plate's `_small.png` and preserves heap
-headroom for networking. Compressed and uncompressed ZIP members are each
-limited to 24 KiB, the central directory to 32 KiB, the ZIP tail search to 4 KiB,
-and PNG dimensions to 1024×1024. Two decoding passes crop and sample directly
-into a fixed 88×76 grayscale buffer, then dither into an 836-byte bitmap.
-The original full-resolution image is never allocated on WROOM.
+With `arduino-cli` on your PATH and the dependencies above installed:
 
-The WeAct profile also checks embedded archive titles when filename lookup
-fails. Unavailable, oversized, unsupported, ambiguous, or unmatched images
-show the Bambu logo; telemetry continues. Cloud jobs may have no local
-image. A new job invalidates the previous preview. The last completed job's
-image remains until the job changes. WeAct uses serial logging and no SD cache.
-Actual FTP/TLS memory availability and panel behavior still require hardware
-validation; successful compilation does not establish runtime compatibility.
+```sh
+arduino-cli compile \
+  --fqbn esp32:esp32:esp32:PartitionScheme=huge_app \
+  --build-property compiler.cpp.extra_flags=-DMONITOR_DISPLAY=2 \
+  --build-path .arduino/build-weact Bambu_Monitor_ESP32
 
-### Desktop preview and fallback logo
+arduino-cli board list
 
-Run `python3 tools/preview/render_weact.py` with Pillow, gcc/g++, Adafruit GFX,
-and pngle installed. Set `ADAFRUIT_GFX_LIB` to the GFX library root and `PNGLE_LIB`
-to pngle's `src` directory if necessary. The harness uses the firmware renderer
-and decoder, checks invalid/truncated images, and writes scenarios to
-`tools/preview/out/weact/`.
+arduino-cli upload \
+  --fqbn esp32:esp32:esp32:PartitionScheme=huge_app \
+  --upload-property upload.speed=115200 \
+  --port /dev/cu.usbserial-0001 \
+  --input-dir .arduino/build-weact Bambu_Monitor_ESP32
+```
 
-When no live model preview is available, the WeAct display shows the Bambu Lab
-logo mark from [Bambu Studio](https://github.com/bambulab/BambuStudio/blob/master/resources/images/splash_logo.svg).
-A successfully loaded model preview automatically replaces the logo.
+Replace the port with your board's port. If using an isolated CLI installation,
+pass `--config-file /path/to/arduino-cli.yaml` to each command. The local
+`.arduino/` toolchain and `.vscode/` tasks are ignored by Git and are not shipped
+with the repository. Serial logging uses **115200 baud**.
 
-### WeAct thumbnail rendering settings
+## Model preview matching
 
-Edit the compile-time constants in `WeactPreviewStyle` near the top of
-`Bambu_Monitor_ESP32/preview_weact.h`, then rebuild/upload:
+The WeAct firmware tries confirmed mappings in `thumbnail_sources.h`, matching
+archive filenames, and the task-ID cache path. If these fail, it scans stored
+3MF archives for an exact embedded `ProfileTitle` or `Title` matching the
+printer-reported job name. This handles MakerWorld profiles whose names differ
+from the downloaded filename. Duplicate metadata-title matches are rejected
+rather than choosing an arbitrary file. The active plate determines which
+thumbnail member is requested.
 
-| Setting | Default | Effect |
+The archive must be accessible through the printer's local FTPS storage. A
+cloud or LAN submission alone does not establish whether the file is available.
+Correct telemetry does not guarantee that a preview can be retrieved. Avoid
+assuming the newest stored file is the active print.
+
+A scan can take several minutes with many stored files. It uses batches of eight
+filenames and services MQTT between transfers. Incomplete range reads get one
+retry with a fresh FTP session; failed thumbnail attempts retry later. The last
+completed job can finish loading its image. A job change invalidates the old
+preview. Unavailable or ambiguous previews show the Bambu logo.
+
+On the PSRAM-free WeAct profile:
+
+- Compressed and expanded image/metadata members are limited to 24 KiB each.
+- ZIP central directories are limited to 32 KiB; the tail search reads up to 4 KiB.
+- PNG dimensions are limited to 1024×1024; the current plate's small PNG is preferred.
+- Two decoder passes crop and sample into an 88×76 grayscale buffer, then produce
+  an 836-byte bitmap. No full-resolution source PNG buffer is allocated.
+- The large PNG decoder allocation is made before the small sampling context.
+- Serial logging is used; there is no SD thumbnail cache on WeAct.
+
+## Appearance controls
+
+Edit `WeactStyle` near the top of `Bambu_Monitor_ESP32/screen_weact.h` for text
+fonts, colors, and sensor boldness. Placement is in `drawWeactScreen` in the same
+file. The layer line uses standard-case **Layer** in 7-point Chicago.
+
+Thumbnail controls live in `WeactPreviewStyle` near the top of
+`Bambu_Monitor_ESP32/preview_weact.h`:
+
+| Setting | Current value | Effect |
 | --- | --- | --- |
-| `GAMMA` | `2.2f` | Values above 1 brighten midtones; 1 is neutral. |
-| `CONTRAST` | `0.90f` | 1 is neutral; lower softens shadows, higher strengthens contrast. |
-| `SHARPEN_PERCENT` | `25` | Mild edge enhancement; 0 disables, maximum 100. |
-| `BLACK_THRESHOLD` | `120` | Lower favors white; higher favors black (1–254). |
-| `DITHER` | `PreviewDither::FloydSteinberg` | Also supports `PreviewDither::Atkinson`. |
+| `THUMB_BRIGHTNESS` | `6` | Signed grayscale offset immediately before dithering; positive lightens, negative darkens. |
+| `THUMB_HIGHLIGHT_CUTOFF` | `248` | Post-brightness values above this become white; 255 disables the cutoff. |
+| `GAMMA` | `2.2f` | Above 1 brightens midtones. |
+| `CONTRAST` | `0.90f` | 1 is neutral; lower softens contrast. |
+| `SHARPEN_PERCENT` | `25` | Mild sharpening; 0 disables. |
+| `BLACK_THRESHOLD` | `120` | Lower favors white, higher favors black. |
+| `DITHER` | `PreviewDither::FloydSteinberg` | Alternative: `PreviewDither::Atkinson`. |
 
-The 88×76 pipeline crops/resizes with the bounded two-pass decoder, adjusts
-levels/gamma/contrast, mildly sharpens, and dithers to a 1-bit black/white bitmap.
-Lifted shadow levels reduce solid-black areas. White margins remain white.
-Threshold changes have a stronger effect in Atkinson; Floyd–Steinberg's error
-feedback tends to preserve average tone, so use gamma for overall brightness.
-Three small grayscale rows and three error rows avoid allocating a second full
-image. The thumbnail uses no red channel.
+For small brightness adjustments, change only `THUMB_BRIGHTNESS` (for example
+6, 12, 18, or 24). Grayscale is **0=black, 255=white**. A brightness value of 0
+leaves the grayscale values unchanged at the offset step; the independently
+configured highlight cutoff still applies afterward. Dithering and all other
+settings remain untouched. Thumbnails never use the red channel.
 
-The desktop preview writes `dither_floyd_steinberg.png` and
-`dither_atkinson.png` using the actual firmware renderer.
+All settings are compile-time: rebuild and upload after editing. After reboot,
+allow time for reconnection, thumbnail retrieval, and the next panel refresh.
+
+### Fonts
+
+Generated Chicago font headers are included. To regenerate them, install Pillow
+and supply your locally installed Chicago TTF:
+
+```sh
+python3 tools/make_weact_font.py --chicago "/path/to/Chicago v0.5.5.ttf"
+```
+
+The Chicago source font is not bundled. Without `--chicago`, this script generates
+FreeSans variants from the font in `tools/fonts/`. The LilyGo font generator is
+`tools/make_fonts.py` and requires `freetype-py`.
+
+## Desktop validation
+
+The host harness exercises the real WeAct renderer and PNG decoder, including
+invalid/truncated input, tone behavior, both dither modes, and black/white-only
+thumbnail output. It needs Pillow, gcc/g++, Adafruit GFX, and pngle:
+
+```sh
+ADAFRUIT_GFX_LIB=/path/to/Adafruit_GFX_Library \
+PNGLE_LIB=/path/to/pngle/src \
+python3 tools/preview/render_weact.py
+
+c++ -std=c++11 tools/tests/thumbnail_identity.cpp -o /tmp/thumbnail_identity
+/tmp/thumbnail_identity
+```
+
+Preview scenarios and dither comparisons are written to `tools/preview/out/weact/`
+(ignored by Git). Desktop checks do not establish physical panel appearance or
+network reliability. Check those on the device after uploading.
+
+`tools/printer_state.py` queries a real printer using local credentials and
+requires `paho-mqtt`. Its printer dump is ignored by Git. Never commit access
+codes, Wi-Fi passwords, printer dumps, or generated build output.
+
+## Original LilyGo profile
+
+The original display is a **LILYGO T5 4.7-inch E-paper V2.3 ESP32-S3**. Use
+`DISPLAY_LILYGO`, install [LilyGo-EPD47's esp32s3 branch](https://github.com/Xinyuan-LilyGO/LilyGo-EPD47/tree/esp32s3),
+and select **ESP32S3 Dev Module**, **OPI PSRAM**, **16MB flash**, and
+**3MB APP/9.9MB FATFS** partitions with ESP32 core 2.0.15. Its optional microSD
+card supports logging and thumbnail caching. `tools/preview/render.py` provides
+the LilyGo desktop preview and additionally needs numpy and LilyGo-EPD47.
+
+## Credits and licence
+
+Original project by Adam Lloyd: [Alloyd21/Bambu_Monitor](https://github.com/Alloyd21/Bambu_Monitor).
+The Mini Turtle used by the desktop preview is from
+[MakerWorld](https://makerworld.com/en/models/2670421-mini-turtle#profileId-2955615).
+The fallback logo comes from
+[Bambu Studio](https://github.com/bambulab/BambuStudio/blob/master/resources/images/splash_logo.svg).
+
+The project retains its [PolyForm Noncommercial 1.0.0 licence](PolyForm%20NonCommercial%201.0.0.txt).
+Inter font licensing is in [tools/fonts/Inter-LICENSE.txt](tools/fonts/Inter-LICENSE.txt);
+FreeFont licensing is in [tools/fonts/FreeFont-LICENSE.txt](tools/fonts/FreeFont-LICENSE.txt).
+Chicago is supplied separately by the user; this project does not grant rights
+to that font.
+
+This is an independent hobby project, not affiliated with or endorsed by Bambu
+Lab. Software is provided as-is, without warranty; see the licence for terms.
