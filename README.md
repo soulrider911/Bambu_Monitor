@@ -5,10 +5,10 @@ A local-network status display for a Bambu Lab H2D, using an ESP32-WROOM and a
 on [Alloyd21/Bambu_Monitor](https://github.com/Alloyd21/Bambu_Monitor) and retains
 the original LilyGo display profile.
 
-![WeAct layout preview](img/weact-preview.png)
+![Example WeAct H2D display with Chicago typography, print progress, and sensor readings](img/weact-example.jpg)
 
-The screenshot is a reference layout; run the desktop renderer below for the
-current typography and thumbnail processing.
+Example display layout with sample print data and the Bambu logo fallback.
+Run the desktop renderer below for previews from the current firmware.
 
 ## Current display
 
