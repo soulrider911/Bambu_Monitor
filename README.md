@@ -28,6 +28,11 @@ this setup. MQTT is serviced while the panel is busy.
 
 ## Hardware and setup
 
+Hardware used for this build:
+
+- **E-paper display:** [WeAct 2.9-inch BWR panel — AliExpress](https://www.aliexpress.us/item/3256804996917340.html). Select the black/white/red (BWR) variant.
+- **ESP32 board:** [ELEGOO ESP-WROOM-32 development board — Amazon](https://www.amazon.com/dp/B0D8T53CQ5).
+
 The current WeAct setup has been used with an H2D. The original upstream project
 reports testing its LilyGo profile with an X2D. Other printers and firmware
 versions may report different sensors or expose different local-access options.
