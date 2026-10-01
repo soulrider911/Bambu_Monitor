@@ -12,3 +12,6 @@ tools/preview/out/
 .vscode/
 __pycache__/
 *.pyc
+
+# Local Arduino CLI toolchain and build output
+.arduino/

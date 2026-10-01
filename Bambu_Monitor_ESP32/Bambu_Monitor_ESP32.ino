@@ -1,4 +1,7 @@
-#ifndef BOARD_HAS_PSRAM
+#include "hardware_config.h"
+#include "thumbnail_sources.h"
+#include "thumbnail_identity.h"
+#if !MONITOR_WEACT && !defined(BOARD_HAS_PSRAM)
 #error "Enable OPI PSRAM in Arduino IDE"
 #endif
 
@@ -18,9 +21,14 @@
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
 
+#if MONITOR_WEACT
+#include "screen_weact.h"
+#else
 #include "epd_driver.h"
 #include "utilities.h"
 #include "screen.h"   // status model + everything drawn on the panel
+#endif
+#include <esp_heap_caps.h>
 
 // ZIP metadata type must be declared before Arduino auto-generates function prototypes.
 struct ZipEntryInfo {
@@ -43,6 +51,17 @@ struct PngRenderContext {
 class FtpCtrlClient;
 class FtpDataClient;
 class FtpSession;
+
+// Keep headroom for networking and the PNG decoder; oversized previews are optional.
+void* thumbnailAlloc(size_t size) {
+#if MONITOR_WEACT
+    if (size > 48 * 1024 || ESP.getFreeHeap() < size + 64 * 1024 ||
+        heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < size) return nullptr;
+    return malloc(size);
+#else
+    return ps_malloc(size);
+#endif
+}
 
 // mbedtls handshakes for the FTPS data channel need more than the default 8 KB loop stack.
 SET_LOOP_TASK_STACK_SIZE(16 * 1024);
@@ -115,6 +134,7 @@ public:
     File file;
 
     void beginSD() {
+#if !MONITOR_WEACT
         SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
         sdOk = SD.begin(SD_CS, SPI);
         if (sdOk) {
@@ -123,6 +143,7 @@ public:
         }
         Serial.println(sdOk ? "SD card ready, logging to /log.txt" : "SD card not available");
         if (sdOk) file.println("\n===== boot =====");
+#endif
     }
 
     size_t write(uint8_t c) override { return write(&c, 1); }
@@ -175,7 +196,7 @@ bool loadThumbnailFromSD(const String& key, uint8_t*& out, size_t& outSize) {
         f.close();
         return false;
     }
-    uint8_t* buf = (uint8_t*)ps_malloc(size);
+    uint8_t* buf = (uint8_t*)thumbnailAlloc(size);
     if (!buf) {
         f.close();
         return false;
@@ -195,6 +216,10 @@ bool loadThumbnailFromSD(const String& key, uint8_t*& out, size_t& outSize) {
 // HELPERS
 // ============================================================
 
+String temperatureSignature(float value) {
+    return isnan(value) ? String("--") : String((int)value);
+}
+
 String cleanState(String s) {
     if (s == "RUNNING") return "PRINTING";
     if (s == "PAUSE")   return "PAUSED";
@@ -207,6 +232,10 @@ String cleanState(String s) {
 
 bool isPrinting() {
     return isActiveState(status.state);
+}
+
+bool hasPreviewJob() {
+    return status.jobName.length() && (isPrinting() || status.state == "FINISHED");
 }
 
 static uint16_t rd16(const uint8_t* p) {
@@ -262,10 +291,7 @@ public:
         mbedtls_entropy_free(&entropy);
     }
 
-    bool connect(FtpCtrlClient& ctrl, uint16_t port) {
-        mbedtls_ssl_context* ctrlTls = ctrl.tls();
-        if (!ctrlTls) return false;
-
+    bool open(uint16_t port) {
         if (!tcp.connect(PRINTER_IP, port, 6000)) {
             Log.println("FTP data: TCP connect failed");
             return false;
@@ -274,6 +300,15 @@ public:
         struct timeval tv = {6, 0};
         setsockopt(net.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         setsockopt(net.fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        return true;
+    }
+
+    bool handshake(FtpCtrlClient& ctrl) {
+        mbedtls_ssl_context* ctrlTls = ctrl.tls();
+        if (!ctrlTls) return false;
+        Log.printf("FTP data: free heap %u, largest block %u\n",
+                   (unsigned)ESP.getFreeHeap(),
+                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
         if (mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &entropy, nullptr, 0) != 0) return false;
         if (mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_CLIENT,
@@ -281,7 +316,11 @@ public:
                                         MBEDTLS_SSL_PRESET_DEFAULT) != 0) return false;
         mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_NONE);
         mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &drbg);
-        if (mbedtls_ssl_setup(&ssl, &conf) != 0) return false;
+        int setupResult = mbedtls_ssl_setup(&ssl, &conf);
+        if (setupResult != 0) {
+            Log.printf("FTP data: TLS setup failed (-0x%04x)\n", -setupResult);
+            return false;
+        }
         mbedtls_ssl_set_bio(&ssl, &net, mbedtls_net_send, mbedtls_net_recv, nullptr);
 
         mbedtls_ssl_session session;
@@ -493,13 +532,15 @@ bool ftpOpenTransfer(FtpSession& s, FtpDataClient& data, const String& cmd, uint
     uint16_t dataPort = 0;
     if (!ftpEnterPassive(s.ctrl, dataPort)) return false;
 
-    // vsFTPd sends the 150 reply, then waits for the data-channel TLS handshake.
+    // Establish TCP first, then consume the preliminary control reply before
+    // starting data TLS. This also processes pending control-session tickets
+    // before copying that session for vsFTPd's required TLS resumption.
+    if (!data.open(dataPort)) return false;
     Log.println("FTP > " + cmd);
     s.ctrl.print(cmd + "\r\n");
-    if (!data.connect(s.ctrl, dataPort)) return false;
-
     int code = ftpResponse(s.ctrl);
-    return code / 100 == 1;
+    if (code / 100 != 1) return false;
+    return data.handshake(s.ctrl);
 }
 
 // Closes the data connection and reads the server's final reply (226, or 426
@@ -512,22 +553,27 @@ void ftpEndTransfer(FtpSession& s, FtpDataClient& data, bool opened) {
 }
 
 bool ftpReadRange(FtpSession& s, const String& path, uint32_t offset, uint8_t* out, size_t length) {
-    FtpDataClient data;
-
-    size_t got = 0;
-    bool opened = ftpOpenTransfer(s, data, "RETR " + path, offset);
-    if (opened) {
-        while (got < length) {
-            int n = data.read(out + got, length - got);
-            if (n <= 0) break;
-            got += n;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        size_t got = 0;
+        {
+            FtpDataClient data;
+            bool opened = ftpOpenTransfer(s, data, "RETR " + path, offset);
+            if (opened) {
+                while (got < length) {
+                    int n = data.read(out + got, length - got);
+                    if (n <= 0) break;
+                    got += n;
+                }
+            }
+            ftpEndTransfer(s, data, opened);
         }
+        if (got == length) return true;
+        Log.printf("FTP: read %u of %u bytes; resetting transfer session\n", (unsigned)got, (unsigned)length);
+        s.drop(); // Discard any delayed control reply before retrying the exact range.
+        if (ftpRefused) break;
+        if (mqtt.connected()) mqtt.loop();
     }
-
-    // We intentionally close the data connection after the requested range.
-    ftpEndTransfer(s, data, opened);
-    if (got != length) Log.printf("FTP: read %u of %u bytes\n", (unsigned)got, (unsigned)length);
-    return got == length;
+    return false;
 }
 
 // ============================================================
@@ -536,12 +582,13 @@ bool ftpReadRange(FtpSession& s, const String& path, uint32_t offset, uint8_t* o
 // We only fetch the central directory + selected PNG bytes.
 // ============================================================
 
-bool findZipThumbnail(FtpSession& s, const String& remotePath, ZipEntryInfo& found) {
+bool findZipThumbnail(FtpSession& s, const String& remotePath, ZipEntryInfo& found, const String& member) {
     uint32_t fileSize = 0;
     if (!ftpSize(s, remotePath, fileSize)) return false;
 
-    size_t tailSize = min((uint32_t)65557, fileSize);
-    uint8_t* tail = (uint8_t*)ps_malloc(tailSize);
+    size_t tailSize = min((uint32_t)(MONITOR_WEACT ? 4096 : 65557), fileSize);
+    if (tailSize < 22) return false;
+    uint8_t* tail = (uint8_t*)thumbnailAlloc(tailSize);
     if (!tail) return false;
 
     if (!ftpReadRange(s, remotePath, fileSize - tailSize, tail, tailSize)) {
@@ -565,9 +612,10 @@ bool findZipThumbnail(FtpSession& s, const String& remotePath, ZipEntryInfo& fou
     uint32_t cdOffset = rd32(tail + eocd + 16);
     free(tail);
 
-    if (cdSize == 0 || cdSize > 1024UL * 1024UL) return false;
+    if (cdSize == 0 || cdSize > (MONITOR_WEACT ? 32UL * 1024UL : 1024UL * 1024UL) ||
+        cdOffset > fileSize || cdSize > fileSize - cdOffset) return false;
 
-    uint8_t* cd = (uint8_t*)ps_malloc(cdSize);
+    uint8_t* cd = (uint8_t*)thumbnailAlloc(cdSize);
     if (!cd) return false;
     if (!ftpReadRange(s, remotePath, cdOffset, cd, cdSize)) {
         free(cd);
@@ -582,8 +630,9 @@ bool findZipThumbnail(FtpSession& s, const String& remotePath, ZipEntryInfo& fou
 
     // plate_N.png is 512x512 and suits the 250 px preview; the rest are fallbacks.
     String preferred[] = {
-        "Metadata/" + plate + ".png",
-        "Metadata/" + plate + "_small.png",
+        member,
+        "Metadata/" + plate + (MONITOR_WEACT ? "_small.png" : ".png"),
+        "Metadata/" + plate + (MONITOR_WEACT ? ".png" : "_small.png"),
         "Metadata/plate_1.png",
         "Auxiliaries/.thumbnails/thumbnail_middle.png",
         "Auxiliaries/.thumbnails/thumbnail_3mf.png"
@@ -591,6 +640,7 @@ bool findZipThumbnail(FtpSession& s, const String& remotePath, ZipEntryInfo& fou
 
     bool ok = false;
     for (const String& wanted : preferred) {
+        if (!wanted.length() || (member.length() && wanted != member)) continue;
         size_t pos = 0;
         while (pos + 46 <= cdSize) {
             if (rd32(cd + pos) != 0x02014b50UL) break;
@@ -608,6 +658,11 @@ bool findZipThumbnail(FtpSession& s, const String& remotePath, ZipEntryInfo& fou
             for (uint16_t i = 0; i < nameLen; i++) name += (char)cd[pos + 46 + i];
 
             if (name == wanted) {
+#if MONITOR_WEACT
+                if (rawSize > 24 * 1024 || compSize > 24 * 1024 ||
+                    (method != 0 && method != 8)) break;
+                if (wanted == "Metadata/plate_1.png" && plate != "plate_1") break;
+#endif
                 found.localHeaderOffset = localOfs;
                 found.compressedSize = compSize;
                 found.uncompressedSize = rawSize;
@@ -627,6 +682,8 @@ bool findZipThumbnail(FtpSession& s, const String& remotePath, ZipEntryInfo& fou
 
 bool fetchZipMember(FtpSession& s, const String& remotePath, const ZipEntryInfo& e,
                     uint8_t*& out, size_t& outSize) {
+    if (MONITOR_WEACT && (e.uncompressedSize > 24 * 1024 || e.compressedSize > 24 * 1024)) return false;
+    if (e.method == 0 && e.compressedSize != e.uncompressedSize) return false;
     // Read the local ZIP header to find the actual member data offset.
     uint8_t localHeader[30];
     if (!ftpReadRange(s, remotePath, e.localHeaderOffset, localHeader, sizeof(localHeader))) return false;
@@ -643,9 +700,9 @@ bool fetchZipMember(FtpSession& s, const String& remotePath, const ZipEntryInfo&
 
     // ZIP method 0 = stored/uncompressed.
     if (e.method == 0) {
-        uint8_t* buf = (uint8_t*)ps_malloc(e.uncompressedSize);
+        uint8_t* buf = (uint8_t*)thumbnailAlloc(e.uncompressedSize);
         if (!buf) {
-            Log.println("Could not allocate thumbnail buffer in PSRAM");
+            Log.println("Insufficient memory for thumbnail buffer");
             return false;
         }
 
@@ -669,13 +726,13 @@ bool fetchZipMember(FtpSession& s, const String& remotePath, const ZipEntryInfo&
             return false;
         }
 
-        uint8_t* compressed = (uint8_t*)ps_malloc(e.compressedSize);
-        uint8_t* decoded    = (uint8_t*)ps_malloc(e.uncompressedSize);
+        uint8_t* compressed = (uint8_t*)thumbnailAlloc(e.compressedSize);
+        uint8_t* decoded    = (uint8_t*)thumbnailAlloc(e.uncompressedSize);
 
         if (!compressed || !decoded) {
             if (compressed) free(compressed);
             if (decoded) free(decoded);
-            Log.println("Could not allocate ZIP inflate buffers in PSRAM");
+            Log.println("Insufficient memory for ZIP inflate buffers");
             return false;
         }
 
@@ -719,47 +776,6 @@ void addCandidate(String* arr, int& n, int maxN, const String& s) {
     arr[n++] = s;
 }
 
-// Lists a remote directory and returns the names of *.3mf files in it.
-// Returns -1 if the listing itself failed (as opposed to an empty folder).
-int ftpList3mf(FtpSession& s, const String& dir, String* out, int maxOut) {
-    FtpDataClient data;
-
-    String text;
-    bool ok = ftpOpenTransfer(s, data, "LIST " + dir, 0);
-    if (ok) {
-        uint8_t buf[512];
-        int n;
-        while (text.length() < 16384 && (n = data.read(buf, sizeof(buf))) > 0)
-            for (int i = 0; i < n; i++) text += (char)buf[i];
-    }
-    ftpEndTransfer(s, data, ok);
-    if (!ok) return -1;
-
-    int n = 0;
-    int pos = 0;
-    while (pos < (int)text.length() && n < maxOut) {
-        int eol = text.indexOf('\n', pos);
-        if (eol < 0) eol = text.length();
-        String line = text.substring(pos, eol);
-        line.trim();
-        pos = eol + 1;
-
-        // "-rw-r--r-- 1 user group size Mon DD HH:MM name": name follows 8 fields.
-        if (line.length() == 0 || line[0] == 'd') continue;
-        int idx = 0;
-        for (int field = 0; field < 8 && idx < (int)line.length(); field++) {
-            while (idx < (int)line.length() && line[idx] != ' ') idx++;
-            while (idx < (int)line.length() && line[idx] == ' ') idx++;
-        }
-        String name = line.substring(idx);
-        if (name.endsWith(".3mf")) {
-            Log.println("FTP found: " + name);
-            out[n++] = name;
-        }
-    }
-    return n;
-}
-
 String normalizeName(const String& in) {
     String o;
     for (unsigned i = 0; i < in.length(); i++) {
@@ -767,6 +783,95 @@ String normalizeName(const String& in) {
         if (isalnum((unsigned char)c)) o += (char)tolower((unsigned char)c);
     }
     return o;
+}
+
+// Stream the listing with bounded memory. On WeAct, retain only current-job
+// matches so older files cannot exhaust the candidate slots first.
+int ftpList3mf(FtpSession& s, const String& dir, String* out, int maxOut, const String& job, int skip, bool allFiles) {
+    FtpDataClient data;
+    int seen = 0;
+    int count = 0;
+    String line;
+    line.reserve(1024);
+    bool oversized = false;
+    auto consumeLine = [&]() {
+        line.trim();
+        if (oversized || line.length() == 0 || line[0] == 'd') return;
+        int idx = 0;
+        for (int field = 0; field < 8 && idx < (int)line.length(); field++) {
+            while (idx < (int)line.length() && line[idx] != ' ') idx++;
+            while (idx < (int)line.length() && line[idx] == ' ') idx++;
+        }
+        String name = line.substring(idx);
+        if (!name.endsWith(".3mf")) return;
+        String normalized = normalizeName(name);
+        bool match = job.length() && normalized.length() &&
+            (normalized.indexOf(job) >= 0 || job.indexOf(normalized) >= 0);
+        if (allFiles && seen++ < skip) return;
+        if (count < maxOut && (allFiles || !MONITOR_WEACT || match)) {
+            Log.println("FTP found: " + name);
+            out[count++] = name;
+        }
+    };
+    bool opened = ftpOpenTransfer(s, data, "LIST " + dir, 0);
+    if (opened) {
+        uint8_t buf[512];
+        int n;
+        while ((n = data.read(buf, sizeof(buf))) > 0) {
+            for (int i = 0; i < n; i++) {
+                if (buf[i] == '\n') {
+                    consumeLine();
+                    line = "";
+                    oversized = false;
+                } else if (line.length() < 1024) {
+                    line += (char)buf[i];
+                } else {
+                    oversized = true;
+                }
+            }
+        }
+        if (line.length()) consumeLine();
+    }
+    ftpEndTransfer(s, data, opened);
+    return opened ? count : -1;
+}
+
+// Scan all stored archives in bounded batches. A unique exact metadata title
+// is required; a generic profile title shared by multiple files is ambiguous.
+bool findMetadataArchive(FtpSession& ftp, const String& jobName, const String& key, String& result) {
+    const char* dirs[] = {"/", "/cache"};
+    for (const char* dir : dirs) {
+        for (int skip = 0; ; skip += 8) {
+            String files[8];
+            int count = ftpList3mf(ftp, dir, files, 8, "", skip, true);
+            if (count < 0) return false;
+            for (int i = 0; i < count; ++i) {
+                if (key != status.taskId + "|" + status.jobName || !hasPreviewJob()) return false;
+                String path = String(dir) == "/" ? "/" + files[i] : String(dir) + "/" + files[i];
+                ZipEntryInfo metadata;
+                if (!findZipThumbnail(ftp, path, metadata, "3D/3dmodel.model")) continue;
+                // Keep metadata allocations bounded on both display profiles.
+                if (metadata.uncompressedSize > 24 * 1024 || metadata.compressedSize > 24 * 1024) continue;
+                uint8_t* bytes = nullptr;
+                size_t size = 0;
+                if (!fetchZipMember(ftp, path, metadata, bytes, size)) return false;
+                bool match = thumbnailMetadataMatches((const char*)bytes, size, jobName.c_str());
+                free(bytes);
+                if (match) {
+                    if (result.length() && result != path) {
+                        Log.println("Thumbnail: multiple archives share this metadata title; refusing ambiguous match");
+                        result = "";
+                        return false;
+                    }
+                    result = path;
+                    Log.println("Thumbnail: exact archive metadata match: " + path);
+                }
+                if (mqtt.connected()) mqtt.loop();
+            }
+            if (count < 8) break;
+        }
+    }
+    return result.length() > 0;
 }
 
 bool fetchCurrentJobThumbnail() {
@@ -797,13 +902,21 @@ bool fetchCurrentJobThumbnail() {
     int n = 0;
     bool listed = false;
 
+    // User-confirmed paths take priority when plate and archive names differ.
+    for (const auto& source : THUMBNAIL_SOURCES) {
+        if (job == normalizeName(source.jobName)) {
+            addCandidate(candidates, n, 24, source.archivePath);
+            Log.println("Thumbnail: using configured job-to-file mapping");
+        }
+    }
+
     // Look at what is actually on the printer's storage: the archive name
     // rarely equals the job name (e.g. "<name>_4_Colors_(PrintByObject).gcode.3mf").
     // Files whose name contains the job name are tried first, then the rest.
     const char* listDirs[] = {"/", "/cache"};
     for (const char* d : listDirs) {
         String found[16];
-        int count = ftpList3mf(ftp, d, found, 16);
+        int count = ftpList3mf(ftp, d, found, 16, job, 0, false);
         if (count < 0) continue;
         listed = true;
         String prefix = String(d) == "/" ? "/" : String(d) + "/";
@@ -811,7 +924,7 @@ bool fetchCurrentJobThumbnail() {
             for (int i = 0; i < count; i++) {
                 String f = normalizeName(found[i]);
                 bool match = job.length() && (f.indexOf(job) >= 0 || job.indexOf(f) >= 0);
-                if ((pass == 0) == match) addCandidate(candidates, n, 24, prefix + found[i]);
+                if ((pass == 0) == match && (!MONITOR_WEACT || match)) addCandidate(candidates, n, 24, prefix + found[i]);
             }
         }
     }
@@ -822,13 +935,25 @@ bool fetchCurrentJobThumbnail() {
 
     if (!listed) Log.println("Thumbnail: could not list printer storage");
 
-    for (int i = 0; i < n; i++) {
+    bool metadataSearched = false;
+    for (int i = 0; i <= n; i++) {
+        if (i == n) {
+            if (metadataSearched || ftpRefused) break;
+            metadataSearched = true;
+            String matched;
+            Log.println("Thumbnail: searching archive profile/title metadata");
+            if (!findMetadataArchive(ftp, status.jobName, key, matched)) break;
+            // Reuse a slot even if the regular candidate array was full.
+            candidates[0] = matched;
+            i = 0;
+            n = 1;
+        }
         // Stop if the printer started refusing us part-way; retrying every
         // candidate would only open more connections.
         if (ftpRefused) break;
         Log.println("Thumbnail: trying " + candidates[i]);
         ZipEntryInfo entry;
-        if (!findZipThumbnail(ftp, candidates[i], entry)) continue;
+        if (!findZipThumbnail(ftp, candidates[i], entry, "")) continue;
 
         Log.printf("Thumbnail member: %s (%lu bytes, method %u)\n",
                       entry.name.c_str(), (unsigned long)entry.uncompressedSize, entry.method);
@@ -842,6 +967,19 @@ bool fetchCurrentJobThumbnail() {
                 Log.println("Thumbnail: job changed during download, discarding");
                 return false;
             }
+#if MONITOR_WEACT
+            // Close TLS sockets before decoding to recover their working memory.
+            ftp.drop();
+            Log.printf("Thumbnail decode heap: %u free, %u largest block\n",
+                       ESP.getFreeHeap(), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+            bool decoded = decodeWeactPreview(png, pngSize);
+            free(png);
+            if (!decoded) return false;
+            thumbnailReady = true;
+            thumbnailKey = key;
+            Log.println("Thumbnail decoded and ready for display");
+            return true;
+#else
             clearThumbnail();
             thumbnailPng = png;
             thumbnailPngSize = pngSize;
@@ -850,6 +988,7 @@ bool fetchCurrentJobThumbnail() {
             Log.printf("Thumbnail ready: %u bytes\n", (unsigned)thumbnailPngSize);
             saveThumbnailToSD(thumbnailPng, thumbnailPngSize, key);
             return true;
+#endif
         }
     }
 
@@ -865,11 +1004,12 @@ bool fetchCurrentJobThumbnail() {
 // the duplicate-symbol linker problem caused by PNGdec.
 // ============================================================
 
+#if !MONITOR_WEACT
 void pngInitCallback(pngle_t* png, uint32_t w, uint32_t h) {
     PngRenderContext* ctx = (PngRenderContext*)pngle_get_user_data(png);
     if (!ctx || w == 0 || h == 0 || w > 1024 || h > 1024) return;
 
-    ctx->grey = (uint8_t*)ps_malloc((size_t)w * h);
+    ctx->grey = (uint8_t*)thumbnailAlloc((size_t)w * h);
     if (!ctx->grey) {
         Log.println("Could not allocate thumbnail grey buffer");
         return;
@@ -1107,7 +1247,7 @@ void pushRegion(Rect_t r, bool flash, bool inkOnly = false) {
     area.height = y1 - y0;
 
     size_t rowBytes = area.width / 2;
-    uint8_t* buf = (uint8_t*)ps_malloc(rowBytes * area.height);
+    uint8_t* buf = (uint8_t*)thumbnailAlloc(rowBytes * area.height);
     if (!buf) return;
     for (int32_t y = 0; y < area.height; y++)
         memcpy(buf + y * rowBytes, framebuffer + (size_t)(y0 + y) * (EPD_WIDTH / 2) + x0 / 2, rowBytes);
@@ -1166,6 +1306,23 @@ void renderDisplay() {
     prevFieldCount = curFieldCount;
     prevLayout = layout;
 }
+
+#else
+unsigned long weactLastRefresh = 0;
+void weactBusy(const void*) {
+    if (mqtt.connected()) mqtt.loop();
+    delay(1);
+}
+void renderDisplay() {
+    screenDirty = false;
+    // Drawing completes before the busy callback can update telemetry.
+    bool withThumb = thumbnailReady && thumbnailKey == status.taskId + "|" + status.jobName;
+    drawWeactScreen(status, withThumb, thumbnailAttempts > 0);
+    weact.display(false);
+    weact.powerOff();
+    weactLastRefresh = millis();
+}
+#endif
 
 // ============================================================
 // PARSE BAMBU STATUS
@@ -1259,7 +1416,7 @@ void parsePrinterStatus(const byte* payload, unsigned int length) {
         forceRender = true;
     }
 
-    if (isPrinting() && newKey != oldKey && newKey != thumbnailKey) {
+    if (newKey != oldKey && newKey != thumbnailKey) {
         clearThumbnail();
         thumbnailAttempted = false;
         thumbnailAttempts = 0;
@@ -1268,7 +1425,7 @@ void parsePrinterStatus(const byte* payload, unsigned int length) {
     }
 
     // If we boot while a print is already running, schedule the first attempt.
-    if (isPrinting() && !thumbnailReady && !thumbnailAttempted)
+    if (hasPreviewJob() && !thumbnailReady && !thumbnailAttempted)
         thumbnailFetchPending = true;
 
     status.lastMessage = millis();
@@ -1365,10 +1522,14 @@ unsigned long bootDoneAt = 0;
 // Draw a boot step into its row. A finished step replaces its in-progress
 // line, so that row is flashed clean first.
 void bootLine(int row, const String& text, bool done) {
+#if MONITOR_WEACT
+    Log.println(text);
+#else
     Rect_t area = drawBootLine(row, text, done);
     epd_poweron();
     pushRegion(area, done);
     epd_poweroff();
+#endif
 }
 
 // ============================================================
@@ -1380,6 +1541,13 @@ void setup() {
     delay(1000);
     Log.beginSD();
 
+#if MONITOR_WEACT
+    SPI.begin(18, -1, 23, 5);
+    weact.init(115200);
+    weact.setRotation(3); // Landscape, rotated 180 degrees for the housing.
+    weact.epd2.setBusyCallback(weactBusy);
+    renderDisplay();
+#else
     framebuffer = (uint8_t*)ps_calloc(sizeof(uint8_t), EPD_WIDTH * EPD_HEIGHT / 2);
     if (!framebuffer) {
         Log.println("Framebuffer allocation failed");
@@ -1394,6 +1562,8 @@ void setup() {
     epd_draw_grayscale_image(epd_full_screen(), framebuffer);
     epd_poweroff();
 
+#endif
+
     bootLine(0, "Connecting to WiFi\xE2\x80\xA6", false);
     connectWiFi();
     bootLine(0, "WiFi connected", true);
@@ -1401,7 +1571,9 @@ void setup() {
     secureClient.setInsecure();
     mqtt.setServer(PRINTER_IP, MQTT_PORT);
     mqtt.setCallback(mqttCallback);
-    mqtt.setBufferSize(49152);
+    // WROOM has no PSRAM: leave room for simultaneous MQTT and FTPS TLS
+    // connections. H2D full status is about 27 KiB, so retain 32 KiB here.
+    mqtt.setBufferSize(MONITOR_WEACT ? 32768 : 49152);
     mqtt.setKeepAlive(60);
     if (strlen(PRINTER_SERIAL) > 0) {
         printerSerial = PRINTER_SERIAL;
@@ -1450,9 +1622,20 @@ void loop() {
     // Draw before doing any FTPS work: the thumbnail search can take a while and
     // must not hold the boot screen up.
     if (screenDirty &&
-        (forceRender || lastRender == 0 || millis() - lastRender >= MIN_REDRAW_INTERVAL)) {
+        (
+#if MONITOR_WEACT
+         millis() - weactLastRefresh >= MIN_REDRAW_INTERVAL
+#else
+         forceRender || lastRender == 0 || millis() - lastRender >= MIN_REDRAW_INTERVAL
+#endif
+        )) {
         forceRender = false;
 
+#if MONITOR_WEACT
+        bool currentPreview = thumbnailReady && thumbnailKey == status.taskId + "|" + status.jobName;
+        String sig = weactStatusSignature(status) + "|thumb=" +
+            (currentPreview ? thumbnailKey : String(thumbnailAttempts > 0 ? "unavailable" : "pending"));
+#else
         String sig =
             status.printerName + "|" +
             status.state + "|" + String(status.stage) + "|" + status.jobName + "|" +
@@ -1460,15 +1643,17 @@ void loop() {
             String(status.layer) + "|" +
             String(status.totalLayers) + "|" +
             String(status.remainingMinutes) + "|" +
-            String((int)status.chamberTemp) + "|" +
-            String((int)status.bedTemp) + "|" +
-            String((int)status.leftNozzleTemp) + "|" +
-            String((int)status.rightNozzleTemp) + "|" +
-            String((int)status.amsTemp) + "|" +
+            temperatureSignature(status.chamberTemp) + "|" +
+            temperatureSignature(status.bedTemp) + "|" +
+            temperatureSignature(status.leftNozzleTemp) + "|" +
+            temperatureSignature(status.rightNozzleTemp) + "|" +
+            temperatureSignature(status.amsTemp) + "|" +
             String(status.amsHumidity) + "|" +
             String(status.amsHumidityRaw) + "|thumb=" +
             String(thumbnailReady ? 1 : 0) + "|fail=" +
             String((thumbnailAttempts > 0 && !thumbnailReady) ? 1 : 0);
+
+#endif
 
         if (sig != lastSignature) {
             lastSignature = sig;
@@ -1481,7 +1666,7 @@ void loop() {
     }
 
     // Do FTPS work outside the MQTT callback, and only once the main screen is up.
-    if (mainScreenShown && thumbnailFetchPending && isPrinting()) {
+    if (mainScreenShown && thumbnailFetchPending && hasPreviewJob()) {
         thumbnailFetchPending = false;
         thumbnailAttempted = true;
         thumbnailAttempts++;
@@ -1489,10 +1674,10 @@ void loop() {
         Log.printf("Attempting local print thumbnail (attempt %d)...\n", thumbnailAttempts);
         static int refusedStreak = 0;
         if (fetchCurrentJobThumbnail()) {
-            forceRender = true;   // show the preview immediately, skip the redraw throttle
+            forceRender = true;   // immediate on LilyGo; WeAct retains its refresh limit
             refusedStreak = 0;
         } else {
-            unsigned long wait = THUMB_RETRY_MS;
+            unsigned long wait = MONITOR_WEACT ? 60UL * 1000UL : THUMB_RETRY_MS;
             if (ftpRefused) {
                 // The printer is refusing connections: give its stale sessions
                 // time to expire (30 s, 60 s, then 2 min).
@@ -1502,6 +1687,7 @@ void loop() {
             } else {
                 refusedStreak = 0;
             }
+            if (MONITOR_WEACT && wait < 60000UL) wait = 60000UL;
             Log.printf("Thumbnail: retrying in %lu s\n", wait / 1000UL);
             thumbnailRetryAt = millis() + wait;
             if (thumbnailAttempts == 1) forceRender = true;   // show the "unavailable" note now

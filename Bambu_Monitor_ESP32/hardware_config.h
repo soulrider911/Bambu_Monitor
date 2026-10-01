@@ -1,0 +1,11 @@
+#pragma once
+// Select in this file, or pass -DMONITOR_DISPLAY=2 to the compiler.
+#define DISPLAY_LILYGO 1
+#define DISPLAY_WEACT 2
+#ifndef MONITOR_DISPLAY
+#define MONITOR_DISPLAY DISPLAY_LILYGO
+#endif
+#if MONITOR_DISPLAY != DISPLAY_LILYGO && MONITOR_DISPLAY != DISPLAY_WEACT
+#error "Unknown MONITOR_DISPLAY"
+#endif
+#define MONITOR_WEACT (MONITOR_DISPLAY == DISPLAY_WEACT)

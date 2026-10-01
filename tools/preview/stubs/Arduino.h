@@ -60,6 +60,6 @@ public:
     }
 };
 
-inline String operator+(const String& a, const String& b) { return String(static_cast<const std::string&>(a) + b); }
+inline String operator+(const String& a, const String& b) { return String(static_cast<const std::string&>(a) + static_cast<const std::string&>(b)); }
 inline String operator+(const char* a, const String& b) { return String(a) + b; }
 inline String operator+(const String& a, const char* b) { return a + String(b); }
