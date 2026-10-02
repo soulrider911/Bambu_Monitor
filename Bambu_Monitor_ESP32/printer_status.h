@@ -9,6 +9,10 @@ struct PrinterStatus {
     String taskId = "";
     String gcodeFile = "";
 
+    String filamentMaterial = "";
+    float filamentGrams = -1;
+    unsigned filamentCount = 0;
+
     int progress = -1;
     int layer = -1;
     int totalLayers = -1;

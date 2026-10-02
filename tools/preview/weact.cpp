@@ -1,3 +1,4 @@
+#include "../../Bambu_Monitor_ESP32/weact_completion.h"
 #include <cstdio>
 #include <fstream>
 #include <iterator>
@@ -36,11 +37,33 @@ int main(int argc, char** argv) {
     png = valid; png[0] = 0;
     assert(!decodeWeactPreview(png.data(), png.size()));
     assert(decodeWeactPreview(valid.data(), valid.size()));
+    WeactCompletion completion;
+    PrinterStatus live;
+    live.state = "PRINTING"; completion.observe(live);
+    live.state = "FINISHED"; completion.observe(live);
+    assert(completion.displayStatus(live).state == "FINISHED");
+    assert(!completion.tick(90000, 60000)); // no timeout before rendering
+    live.state = "IDLE"; completion.observe(live);
+    assert(completion.displayStatus(live).state == "FINISHED");
+    completion.displayed(90000);
+    assert(!completion.tick(149999, 60000));
+    assert(completion.tick(150000, 60000));
+    assert(completion.displayStatus(live).state == "IDLE");
+    live.state = "FINISHED"; completion.observe(live);
+    assert(completion.displayStatus(live).state == "IDLE"); // repeated reports cannot restart hold
+    live.state = "PRINTING"; completion.observe(live);
+    assert(completion.displayStatus(live).state == "PRINTING");
+    live.state = "FINISHED"; completion.observe(live);
+    completion.displayed(160000);
+    live.state = "PREPARING"; completion.observe(live);
+    assert(!completion.tick(230000, 60000));
+    assert(completion.displayStatus(live).state == "PREPARING");
     PrinterStatus s;
     s.printerName = "Bambu Lab X2D"; s.state = "PRINTING"; s.jobName = "Mini Turtle";
     s.progress = 67; s.layer = 142; s.totalLayers = 380; s.remainingMinutes = 134;
     s.chamberTemp = 42; s.bedTemp = 60; s.leftNozzleTemp = 220; s.rightNozzleTemp = 38;
     s.amsTemp = 28; s.amsHumidityRaw = 18;
+    s.filamentMaterial = "PLA"; s.filamentGrams = 24; s.filamentCount = 1;
     String signature = weactStatusSignature(s);
     s.stage = 42; s.lastMessage = 12345; s.amsHumidity = 3;
     assert(weactStatusSignature(s) == signature); // not visible while raw humidity is available
@@ -57,6 +80,7 @@ int main(int argc, char** argv) {
     assert(decodeWeactPreview(valid.data(), valid.size()));
     drawWeactScreen(s, false, true); save("no_preview");
     s.jobName = "An exceptionally long job name that should be truncated";
+    s.filamentCount = 2;
     s.state = "PAUSED"; drawWeactScreen(s, true, false); save("paused");
     s.state = "FINISHED"; s.progress = 100; s.remainingMinutes = 0;
     drawWeactScreen(s, true, false); save("finished");

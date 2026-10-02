@@ -1,6 +1,7 @@
 #include "hardware_config.h"
 #include "thumbnail_sources.h"
 #include "thumbnail_identity.h"
+#include "filament_metadata.h"
 #if !MONITOR_WEACT && !defined(BOARD_HAS_PSRAM)
 #error "Enable OPI PSRAM in Arduino IDE"
 #endif
@@ -874,6 +875,26 @@ bool findMetadataArchive(FtpSession& ftp, const String& jobName, const String& k
     return result.length() > 0;
 }
 
+void fetchFilamentEstimate(FtpSession& ftp, const String& path, const String& key) {
+    int ps = status.gcodeFile.lastIndexOf("plate_");
+    if (ps < 0) return;
+    int plate = status.gcodeFile.substring(ps + 6).toInt();
+    ZipEntryInfo entry;
+    if (!findZipThumbnail(ftp, path, entry, "Metadata/slice_info.config") ||
+        entry.uncompressedSize > 24 * 1024 || entry.compressedSize > 24 * 1024) return;
+    uint8_t* bytes = nullptr;
+    size_t size = 0;
+    if (!fetchZipMember(ftp, path, entry, bytes, size)) return;
+    FilamentEstimate estimate;
+    bool ok = parseFilamentEstimate((const char*)bytes, size, plate, estimate);
+    free(bytes);
+    if (ok && key == status.taskId + "|" + status.jobName) {
+        status.filamentMaterial = estimate.material.c_str();
+        status.filamentGrams = estimate.grams;
+        status.filamentCount = estimate.count;
+    }
+}
+
 bool fetchCurrentJobThumbnail() {
     clearThumbnail();
     String key = status.taskId + "|" + status.jobName;
@@ -958,6 +979,7 @@ bool fetchCurrentJobThumbnail() {
         Log.printf("Thumbnail member: %s (%lu bytes, method %u)\n",
                       entry.name.c_str(), (unsigned long)entry.uncompressedSize, entry.method);
 
+        fetchFilamentEstimate(ftp, candidates[i], key);
         uint8_t* png = nullptr;
         size_t pngSize = 0;
         if (fetchZipMember(ftp, candidates[i], entry, png, pngSize)) {
@@ -1308,6 +1330,8 @@ void renderDisplay() {
 }
 
 #else
+#include "weact_completion.h"
+WeactCompletion weactCompletion;
 unsigned long weactLastRefresh = 0;
 void weactBusy(const void*) {
     if (mqtt.connected()) mqtt.loop();
@@ -1317,10 +1341,13 @@ void renderDisplay() {
     screenDirty = false;
     // Drawing completes before the busy callback can update telemetry.
     bool withThumb = thumbnailReady && thumbnailKey == status.taskId + "|" + status.jobName;
-    drawWeactScreen(status, withThumb, thumbnailAttempts > 0);
+    PrinterStatus displayedStatus = weactCompletion.displayStatus(status);
+    drawWeactScreen(displayedStatus, withThumb, thumbnailAttempts > 0);
+    bool showingCompletion = displayedStatus.state == "FINISHED";
     weact.display(false);
     weact.powerOff();
     weactLastRefresh = millis();
+    if (showingCompletion) weactCompletion.displayed(weactLastRefresh);
 }
 #endif
 
@@ -1416,6 +1443,11 @@ void parsePrinterStatus(const byte* payload, unsigned int length) {
         forceRender = true;
     }
 
+    if (newKey != oldKey) {
+        status.filamentMaterial = "";
+        status.filamentGrams = -1;
+        status.filamentCount = 0;
+    }
     if (newKey != oldKey && newKey != thumbnailKey) {
         clearThumbnail();
         thumbnailAttempted = false;
@@ -1424,6 +1456,9 @@ void parsePrinterStatus(const byte* payload, unsigned int length) {
         thumbnailFetchPending = true;
     }
 
+#if MONITOR_WEACT
+    weactCompletion.observe(status);
+#endif
     // If we boot while a print is already running, schedule the first attempt.
     if (hasPreviewJob() && !thumbnailReady && !thumbnailAttempted)
         thumbnailFetchPending = true;
@@ -1617,6 +1652,9 @@ void loop() {
         screenDirty = true;
     }
 
+#if MONITOR_WEACT
+    if (weactCompletion.tick(millis(), MIN_REDRAW_INTERVAL)) screenDirty = true;
+#endif
     static String lastSignature = "";
 
     // Draw before doing any FTPS work: the thumbnail search can take a while and
@@ -1633,7 +1671,7 @@ void loop() {
 
 #if MONITOR_WEACT
         bool currentPreview = thumbnailReady && thumbnailKey == status.taskId + "|" + status.jobName;
-        String sig = weactStatusSignature(status) + "|thumb=" +
+        String sig = weactStatusSignature(weactCompletion.displayStatus(status)) + "|thumb=" +
             (currentPreview ? thumbnailKey : String(thumbnailAttempts > 0 ? "unavailable" : "pending"));
 #else
         String sig =

@@ -15,7 +15,11 @@ Run the desktop renderer below for previews from the current firmware.
 ## Current display
 
 - Chicago typography, with bitmap text for the job name.
-- Print percentage, remaining time, and layer count; current layer number in red.
+- Print percentage, remaining time with a pixel hourglass, and black layer counts.
+- Slicer-estimated material and total weight, with one outlined circle for a single
+  filament or two overlapping circles for multiple filaments; `--: --g` while unavailable.
+- A completion screen held for one refresh period, followed by a smiling-printer
+  idle screen with “Ready...” and “No active print.”
 - Solid progress fill over a retro 25% black-dot background.
 - Chamber, bed, left/right nozzle, AMS temperature, and AMS humidity readings.
 - Celsius degree symbols; bold sensor values with a regular-weight humidity `%`.
@@ -33,6 +37,7 @@ this setup. MQTT is serviced while the panel is busy.
 Hardware used for this build:
 
 - **E-paper display:** [WeAct 2.9-inch BWR panel — AliExpress](https://www.aliexpress.us/item/3256804996917340.html). Select the black/white/red (BWR) variant.
+- **3D-printable housing:** [Bambu Print Monitor 2.9-inch e-paper display housing — MakerWorld](https://makerworld.com/en/models/3382656-bambu-print-monitor-2-9-epaper-display-housing#profileId-3848887).
 - **ESP32 board:** [ELEGOO ESP-WROOM-32 development board — Amazon](https://www.amazon.com/dp/B0D8T53CQ5).
 
 The current WeAct setup has been used with an H2D. The original upstream project

@@ -15,7 +15,7 @@ parser.add_argument('--chicago', type=Path, help='Path to an installed Chicago T
 args = parser.parse_args()
 if args.chicago:
     source = args.chicago
-    variants = [(9, 'small', 'ChicagoSmall'), (13, 'label', 'ChicagoLabel'),
+    variants = [(9, 'small', 'ChicagoSmall'), (11, 'filament', 'ChicagoFilament'), (13, 'label', 'ChicagoLabel'),
                 (round(7 * 141 / 72), 'layer', 'Chicago7pt'),
                 (17, 'title', 'ChicagoTitle'), (35, 'progress', 'ChicagoProgress')]
 else:
